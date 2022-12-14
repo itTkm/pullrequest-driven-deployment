@@ -7,9 +7,6 @@ on:
       - master
       - 'feature/*'
 
-env:
-  AZURE_CLI_VERSION: 2.42.0
-
 jobs:
   ci:
     runs-on: ${{ matrix.os }}
@@ -54,8 +51,8 @@ jobs:
       - name: Generate .env file for Deployment 📝
         run: |
           cat <<EOF > .env
-          BASE_URL=${{ secrets.BASE_URL }}
-          ROUTER_BASE=/${{ github.event.repository.name }}/${{ github.event.number }}/
+          BASE_URL=http://storage.googleapis.com
+          ROUTER_BASE=/${{ secrets.GCP_BUCKET_NAME }}/${{ github.event.repository.name }}/${{ github.event.number }}/
           EOF
 
       - name: Build and Generate 🔧
@@ -68,6 +65,8 @@ jobs:
           path: dist
 
   pullrequest-driven-deployment:
+    if: ${{ github.event_name == 'pull_request' }}
+
     needs:
       - ci
 
@@ -83,32 +82,26 @@ jobs:
           name: dist
           path: artifact/${{ github.event.repository.name }}/${{ github.event.number }}
 
-      - name: Login to Azure 🆔
-        uses: Azure/login@v1
+      - name: Login to Google Cloud 🆔
+        uses: google-github-actions/auth@v1
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
 
-      - name: Deploy to Azure Static WebSite hosting on Azure Blob storage 🚚
-        uses: azure/CLI@v1
-        with:
-          azcliversion: ${{ env.AZURE_CLI_VERSION }}
-          inlineScript: |
-            # Undeploy legacy contents
-            az storage blob delete-batch \
-              --source \$web \
-              --pattern ${{ github.event.repository.name }}/${{ github.event.number }}* \
-              --account-name ${{ secrets.AZURE_SA_NAME }}
-            # Deploy new contents
-            az storage blob upload-batch \
-              --source artifact \
-              --destination \$web \
-              --account-name ${{ secrets.AZURE_SA_NAME }}
+      - name: Set up Cloud SDK 🏗
+        uses: google-github-actions/setup-gcloud@v1
+
+      - name: Deploy to Google Cloud Storage 🚚
+        run: |
+          # Undeploy legacy contents
+          gsutil -m rm -r gs://${{ secrets.GCP_BUCKET_NAME }}/${{ github.event.repository.name }}/${{ github.event.number }} 2> /dev/null || true
+          # Deploy new contents
+          gsutil -m -h "Cache-Control:no-store" cp -a public-read -r artifact/* gs://${{ secrets.GCP_BUCKET_NAME }}
 
       - name: Create comments message 📝
         run: |
           cat << EOF > comments
-          Deployed the latest code to Azure Static WebSite hosting in Azure Blob storage.
-          ${{ secrets.BASE_URL }}/${{ github.event.repository.name }}/${{ github.event.number }}/
+          Deployed the latest code to Google Cloud Storage.
+          http://storage.googleapis.com/${{ secrets.GCP_BUCKET_NAME }}/${{ github.event.repository.name }}/${{ github.event.number }}/
           EOF
 
       - name: Post comments to PR 📮
