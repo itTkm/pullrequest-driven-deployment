@@ -1,0 +1,118 @@
+name: CI/CD Workflow
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+      - 'feature/*'
+
+env:
+  AZURE_CLI_VERSION: 2.42.0
+
+jobs:
+  ci:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        node: [14]
+
+    steps:
+      - name: Checkout 🛎
+        uses: actions/checkout@master
+
+      - name: Setup node env 🏗
+        uses: actions/setup-node@v2.1.5
+        with:
+          node-version: ${{ matrix.node }}
+          check-latest: true
+
+      - name: Get yarn cache directory path 🛠
+        id: yarn-cache-dir-path
+        run: echo "::set-output name=dir::$(yarn cache dir)"
+
+      - name: Cache node_modules 📦
+        uses: actions/cache@v2.1.4
+        id: yarn-cache # use this to check for `cache-hit` (`steps.yarn-cache.outputs.cache-hit != 'true'`)
+        with:
+          path: ${{ steps.yarn-cache-dir-path.outputs.dir }}
+          key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-
+
+      - name: Install dependencies 👨🏻‍💻
+        run: yarn
+
+      - name: Run linter 👀
+        run: yarn lint
+
+      - name: Run tests 🧪
+        run: yarn test
+
+      - name: Generate .env file for Deployment 📝
+        run: |
+          cat <<EOF > .env
+          BASE_URL=${{ secrets.BASE_URL }}
+          ROUTER_BASE=/${{ github.event.repository.name }}/${{ github.event.number }}/
+          EOF
+
+      - name: Build and Generate 🔧
+        run: yarn generate
+
+      - name: Archive to artifact 📦
+        uses: actions/upload-artifact@master
+        with:
+          name: dist
+          path: dist
+
+  pullrequest-driven-deployment:
+    needs:
+      - ci
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout 🛎
+        uses: actions/checkout@master
+
+      - name: Download Artifact 📦
+        uses: actions/download-artifact@master
+        with:
+          name: dist
+          path: artifact/${{ github.event.repository.name }}/${{ github.event.number }}
+
+      - name: Login to Azure 🆔
+        uses: Azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy to Azure Static WebSite hosting on Azure Blob storage 🚚
+        uses: azure/CLI@v1
+        with:
+          azcliversion: ${{ env.AZURE_CLI_VERSION }}
+          inlineScript: |
+            # Undeploy legacy contents
+            az storage blob delete-batch \
+              --source \$web \
+              --pattern ${{ github.event.repository.name }}/${{ github.event.number }}* \
+              --account-name ${{ secrets.AZURE_SA_NAME }}
+            # Deploy new contents
+            az storage blob upload-batch \
+              --source artifact \
+              --destination \$web \
+              --account-name ${{ secrets.AZURE_SA_NAME }}
+
+      - name: Create comments message 📝
+        run: |
+          cat << EOF > comments
+          Deployed the latest code to Azure Static WebSite hosting in Azure Blob storage.
+          ${{ secrets.BASE_URL }}/${{ github.event.repository.name }}/${{ github.event.number }}/
+          EOF
+
+      - name: Post comments to PR 📮
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr comment -F ./comments "${URL}"
